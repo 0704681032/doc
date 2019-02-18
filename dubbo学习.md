@@ -436,3 +436,59 @@ public class TaskQueue<R extends Runnable> extends LinkedBlockingQueue<Runnable>
     }
 ```
 
+
+
+```java
+//AbstractRegistry   
+public void doSaveProperties(long version) {
+        if (version < lastCacheChanged.get()) {
+            return;
+        }
+        if (file == null) {
+            return;
+        }
+        // Save
+        try {
+            File lockfile = new File(file.getAbsolutePath() + ".lock");
+            if (!lockfile.exists()) {
+                lockfile.createNewFile();
+            }
+            RandomAccessFile raf = new RandomAccessFile(lockfile, "rw");
+            try {
+                FileChannel channel = raf.getChannel();
+                try {
+                    FileLock lock = channel.tryLock();
+                    if (lock == null) {
+                        throw new IOException("Can not lock the registry cache file " + file.getAbsolutePath() + ", ignore and retry later, maybe multi java process use the file, please config: dubbo.registry.file=xxx.properties");
+                    }
+                    // Save
+                    try {
+                        if (!file.exists()) {
+                            file.createNewFile();
+                        }
+                        FileOutputStream outputFile = new FileOutputStream(file);
+                        try {
+                            properties.store(outputFile, "Dubbo Registry Cache");
+                        } finally {
+                            outputFile.close();
+                        }
+                    } finally {
+                        lock.release();
+                    }
+                } finally {
+                    channel.close();
+                }
+            } finally {
+                raf.close();
+            }
+        } catch (Throwable e) {
+            if (version < lastCacheChanged.get()) {
+                return;
+            } else {
+                registryCacheExecutor.execute(new SaveProperties(lastCacheChanged.incrementAndGet()));
+            }
+            logger.warn("Failed to save registry store file, cause: " + e.getMessage(), e);
+        }
+    }
+```
+
