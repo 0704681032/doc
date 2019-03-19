@@ -492,3 +492,8 @@ public void doSaveProperties(long version) {
     }
 ```
 
+
+
+这才是设计啊
+
+![image-20190319192300266](/Users/jyy/Library/Application Support/typora-user-images/image-20190319192300266.png)
