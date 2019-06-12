@@ -1,5 +1,69 @@
 dubbo学习片段
 
+```java
+//最喜欢的代码  非常类似于fp中的foldRight
+//在java中形成了闭包
+
+/**
+ * ListenerProtocol
+ */
+public class ProtocolFilterWrapper implements Protocol {
+    private static <T> Invoker<T> buildInvokerChain(final Invoker<T> invoker, String key, String group) {
+        Invoker<T> last = invoker;
+        List<Filter> filters = ExtensionLoader.getExtensionLoader(Filter.class).getActivateExtension(invoker.getUrl(), key, group);
+        if (!filters.isEmpty()) {
+            for (int i = filters.size() - 1; i >= 0; i--) {
+                final Filter filter = filters.get(i);
+                final Invoker<T> next = last;
+                last = new Invoker<T>() {
+
+                    @Override
+                    public Class<T> getInterface() {
+                        return invoker.getInterface();
+                    }
+
+                    @Override
+                    public URL getUrl() {
+                        return invoker.getUrl();
+                    }
+
+                    @Override
+                    public boolean isAvailable() {
+                        return invoker.isAvailable();
+                    }
+
+                    @Override
+                    public Result invoke(Invocation invocation) throws RpcException {
+                        Result result = filter.invoke(next, invocation);
+                        if (result instanceof AsyncRpcResult) {
+                            AsyncRpcResult asyncResult = (AsyncRpcResult) result;
+                            asyncResult.thenApplyWithContext(r -> filter.onResponse(r, invoker, invocation));
+                            return asyncResult;
+                        } else {
+                            return filter.onResponse(result, invoker, invocation);
+                        }
+                    }
+
+                    @Override
+                    public void destroy() {
+                        invoker.destroy();
+                    }
+
+                    @Override
+                    public String toString() {
+                        return invoker.toString();
+                    }
+                };
+            }
+        }
+        return last;
+    }
+}
+
+```
+
+
+
 
 
 ```java
@@ -540,6 +604,77 @@ public void doSaveProperties(long version) {
             logger.warn("Failed to save registry store file, cause: " + e.getMessage(), e);
         }
     }
+```
+
+
+
+```java
+public class LRUCache<K, V> extends LinkedHashMap<K, V> { //关键点1
+
+    private static final long serialVersionUID = -5167631809472116969L;
+
+    private static final float DEFAULT_LOAD_FACTOR = 0.75f;
+
+    private static final int DEFAULT_MAX_CAPACITY = 1000;
+    private final Lock lock = new ReentrantLock();
+    private volatile int maxCapacity;
+
+    public LRUCache() {
+        this(DEFAULT_MAX_CAPACITY);
+    }
+
+    public LRUCache(int maxCapacity) {
+        super(16, DEFAULT_LOAD_FACTOR, true);////关键点2
+        this.maxCapacity = maxCapacity;
+    }
+
+    @Override
+    protected boolean removeEldestEntry(java.util.Map.Entry<K, V> eldest) {////关键点3
+        return size() > maxCapacity;
+    }
+
+    @Override
+    public boolean containsKey(Object key) {
+        lock.lock();
+        try {
+            return super.containsKey(key);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+  
+}
+```
+
+
+
+```java
+//运用mxbean获取系统信息
+public class LoadStatusChecker implements StatusChecker {
+
+    @Override
+    public Status check() {
+        OperatingSystemMXBean operatingSystemMXBean = ManagementFactory.getOperatingSystemMXBean();
+        double load;
+        try {
+            Method method = OperatingSystemMXBean.class.getMethod("getSystemLoadAverage", new Class<?>[0]);
+            load = (Double) method.invoke(operatingSystemMXBean, new Object[0]);
+            if (load == -1) {
+                com.sun.management.OperatingSystemMXBean bean =
+                        (com.sun.management.OperatingSystemMXBean) operatingSystemMXBean;
+                load = bean.getSystemCpuLoad();
+            }
+        } catch (Throwable e) {
+            load = -1;
+        }
+        int cpu = operatingSystemMXBean.getAvailableProcessors();
+        return new Status(load < 0 ? Status.Level.UNKNOWN : (load < cpu ? Status.Level.OK : Status.Level.WARN),
+                (load < 0 ? "" : "load:" + load + ",") + "cpu:" + cpu);
+    }
+
+}
+
 ```
 
 
