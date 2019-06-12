@@ -3,6 +3,7 @@ dubbo学习片段
 
 
 ```java
+//新版的dubbo改用HashedWheelTimer来实现了
 public class FailbackClusterInvoker<T> extends AbstractClusterInvoker<T> {
     
     private static final long RETRY_FAILED_PERIOD = 5;
@@ -27,6 +28,55 @@ public class FailbackClusterInvoker<T> extends AbstractClusterInvoker<T> {
             logger.error("Failback background works error,invocation->" + invocation + ", exception: " + e.getMessage());
         }
     }
+  
+   private class RetryTimerTask implements TimerTask {
+        private final Invocation invocation;
+        private final LoadBalance loadbalance;
+        private final List<Invoker<T>> invokers;
+        private final int retries;
+        private final long tick;
+        private Invoker<T> lastInvoker;
+        private int retryTimes = 0;
+
+        RetryTimerTask(LoadBalance loadbalance, Invocation invocation, List<Invoker<T>> invokers, Invoker<T> lastInvoker, int retries, long tick) {
+            this.loadbalance = loadbalance;
+            this.invocation = invocation;
+            this.invokers = invokers;
+            this.retries = retries;
+            this.tick = tick;
+            this.lastInvoker=lastInvoker;
+        }
+
+        @Override
+        public void run(Timeout timeout) {
+            try {
+                Invoker<T> retryInvoker = select(loadbalance, invocation, invokers, Collections.singletonList(lastInvoker));
+                lastInvoker = retryInvoker;
+                retryInvoker.invoke(invocation);
+            } catch (Throwable e) {
+                logger.error("Failed retry to invoke method " + invocation.getMethodName() + ", waiting again.", e);
+                if ((++retryTimes) >= retries) {
+                    logger.error("Failed retry times exceed threshold (" + retries + "), We have to abandon, invocation->" + invocation);
+                } else {
+                    rePut(timeout);
+                }
+            }
+        }
+
+        private void rePut(Timeout timeout) {
+            if (timeout == null) {
+                return;
+            }
+
+            Timer timer = timeout.timer();
+            if (timer.isStop() || timeout.isCancelled()) {
+                return;
+            }
+
+            timer.newTimeout(timeout.task(), tick, TimeUnit.SECONDS);
+        }
+    }
+  
 ```
 
 
@@ -156,7 +206,7 @@ public class ForkingClusterInvoker<T> extends AbstractClusterInvoker<T> {
                             ref.offer(result);
                         } catch (Throwable e) {
                             int value = count.incrementAndGet();
-                            if (value >= selected.size()) {
+                            if (value >= selected.size()) {//这里值得学习
                                 ref.offer(e);
                             }
                         }
@@ -165,7 +215,7 @@ public class ForkingClusterInvoker<T> extends AbstractClusterInvoker<T> {
             }
             try {
                 Object ret = ref.poll(timeout, TimeUnit.MILLISECONDS);
-                if (ret instanceof Throwable) {
+                if (ret instanceof Throwable) {//这里指的学习
                     Throwable e = (Throwable) ret;
                     throw new RpcException(e instanceof RpcException ? ((RpcException) e).getCode() : 0, "Failed to forking invoke provider " + selected + ", but no luck to perform the invocation. Last error is: " + e.getMessage(), e.getCause() != null ? e.getCause() : e);
                 }
