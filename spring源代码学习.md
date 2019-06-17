@@ -290,3 +290,219 @@ public class DeferredResultMethodReturnValueHandler implements HandlerMethodRetu
 
 ```
 
+
+
+```java
+/*
+ * Copyright 2017 Alibaba Group
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.aliyuncs.http.clients;
+
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.apache.http.conn.HttpClientConnectionManager;
+
+public class ApacheIdleConnectionCleaner extends Thread {
+
+    private static final Log LOG = LogFactory.getLog(ApacheIdleConnectionCleaner.class);
+    private static final int PERIOD_SEC = 60;
+
+    private static volatile ApacheIdleConnectionCleaner instance;
+    private static final Map<HttpClientConnectionManager, Long> connMgrMap = new ConcurrentHashMap<HttpClientConnectionManager, Long>();
+
+    private volatile boolean isShuttingDown;
+
+    private ApacheIdleConnectionCleaner() {
+        super("sdk-apache-idle-connection-cleaner");
+        setDaemon(true);
+    }
+
+    public static void registerConnectionManager(HttpClientConnectionManager connMgr, Long idleTimeMills){
+        if (instance == null) {
+            synchronized (ApacheIdleConnectionCleaner.class) {
+                if (instance == null) {
+                    instance = new ApacheIdleConnectionCleaner();
+                    instance.start();
+                }
+            }
+        }
+        connMgrMap.put(connMgr, idleTimeMills);
+    }
+
+    public static void removeConnectionManager(HttpClientConnectionManager connectionManager) {
+        connMgrMap.remove(connectionManager);
+        if (connMgrMap.isEmpty()) {
+            shutdown();
+        }
+    }
+
+    public static void shutdown(){
+        if (instance != null) {
+            instance.isShuttingDown = true;
+            instance.interrupt();
+            connMgrMap.clear();
+            instance = null;
+        }
+    }
+
+    @Override
+    public void run() {
+        while (true) {
+            if (isShuttingDown) {
+                LOG.debug("Shutting down.");
+                return;
+            }
+            try {
+                Thread.sleep(PERIOD_SEC * 1000);
+
+                for (Entry<HttpClientConnectionManager, Long> entry : connMgrMap.entrySet()) {
+                    try {
+                        entry.getKey().closeIdleConnections(entry.getValue(), TimeUnit.MILLISECONDS);
+                    } catch (Exception t) {
+                        LOG.warn("close idle connections failed", t);
+                    }
+                }
+            } catch (InterruptedException e){
+                LOG.debug("interrupted.", e);
+            } catch (Throwable t) {
+                LOG.warn("fatal error", t);
+            }
+        }
+    }
+
+}
+```
+
+
+
+```java
+public class ApacheHttpClient extends IHttpClient {
+
+    protected static final String CONTENT_TYPE = "Content-Type";
+    protected static final String ACCEPT_ENCODING = "Accept-Encoding";
+
+    private static final String EXT_PARAM_KEY_BUILDER = "apache.httpclient.builder";
+    private static final int DEFAULT_THREAD_KEEP_ALIVE_TIME = 60;
+
+    private ExecutorService executorService;
+    private CloseableHttpClient httpClient;
+    private PoolingHttpClientConnectionManager connectionManager;
+
+    public ApacheHttpClient(HttpClientConfig config) throws ClientException {
+        super(config);
+    }
+
+    @Override
+    protected void init(final HttpClientConfig config) throws ClientException {
+        HttpClientBuilder builder;
+        if (config.containsExtParam(EXT_PARAM_KEY_BUILDER)) {
+            builder = (HttpClientBuilder)config.getExtParam(EXT_PARAM_KEY_BUILDER);
+        } else {
+            builder = HttpClientBuilder.create();
+        }
+
+        // default request config
+        RequestConfig defaultConfig = RequestConfig.custom()
+            .setConnectTimeout((int)config.getConnectionTimeoutMillis())
+            .setSocketTimeout((int)config.getReadTimeoutMillis())
+            .setConnectionRequestTimeout((int)config.getWriteTimeoutMillis())
+            .build();
+        builder.setDefaultRequestConfig(defaultConfig);
+
+        // https
+        RegistryBuilder<ConnectionSocketFactory> socketFactoryRegistryBuilder = RegistryBuilder.create();
+        socketFactoryRegistryBuilder.register("http", new PlainConnectionSocketFactory());
+        if (config.isIgnoreSSLCerts() || X509TrustAll.isIgnoreSSLCerts()) {
+            try
+            {
+                SSLContext sslContext = new SSLContextBuilder().loadTrustMaterial(null, new TrustStrategy()
+                {
+                    // trust all
+                    @Override
+                    public boolean isTrusted(X509Certificate[] chain, String authType) throws CertificateException
+                    {
+                        return true;
+                    }
+                }).build();
+
+                SSLConnectionSocketFactory connectionFactory = new SSLConnectionSocketFactory(sslContext, NoopHostnameVerifier.INSTANCE);
+
+                socketFactoryRegistryBuilder.register("https", connectionFactory);
+
+            } catch(Exception e) {
+                throw new ClientException("SDK.InitFailed", "Init https with SSL certs ignore failed", e);
+            }
+        } else {
+            if (config.getSslSocketFactory() != null) {
+                SSLConnectionSocketFactory sslConnectionSocketFactory = new SSLConnectionSocketFactory(config.getSslSocketFactory(),
+                    config.getHostnameVerifier());
+                socketFactoryRegistryBuilder.register("https", sslConnectionSocketFactory);
+            }else if (config.getKeyManagers() != null || config.getX509TrustManagers() != null || config.getSecureRandom() != null) {
+                try {
+                    SSLContext sslContext = SSLContext.getInstance("TLS");
+                    sslContext.init(config.getKeyManagers(), config.getX509TrustManagers(), config.getSecureRandom());
+                    SSLConnectionSocketFactory sslConnectionSocketFactory = new SSLConnectionSocketFactory(sslContext);
+                    socketFactoryRegistryBuilder.register("https", sslConnectionSocketFactory);
+                } catch (NoSuchAlgorithmException e1) {
+                    throw new SSLInitializationException(e1.getMessage(), e1);
+                } catch (KeyManagementException e2) {
+                    throw new SSLInitializationException(e2.getMessage(), e2);
+                }
+            }
+        }
+
+        // connPool
+        connectionManager = new PoolingHttpClientConnectionManager(socketFactoryRegistryBuilder.build());
+        connectionManager.setMaxTotal(config.getMaxRequests());
+        connectionManager.setDefaultMaxPerRoute(config.getMaxRequestsPerHost());
+        builder.setConnectionManager(connectionManager);
+        ApacheIdleConnectionCleaner.registerConnectionManager(connectionManager, config.getMaxIdleTimeMillis());
+
+        // async
+        if (config.getExecutorService() == null) {
+            executorService = new ThreadPoolExecutor(0, config.getMaxRequests(), DEFAULT_THREAD_KEEP_ALIVE_TIME, TimeUnit.SECONDS,
+                new SynchronousQueue<Runnable>(),
+                new DefaultAsyncThreadFactory());
+        } else {
+            executorService = config.getExecutorService();
+        }
+
+        // keepAlive
+        if (config.getKeepAliveDurationMillis() > 0) {
+            builder.setKeepAliveStrategy(new ConnectionKeepAliveStrategy() {
+                @Override
+                public long getKeepAliveDuration(HttpResponse response, HttpContext context) {
+                    long duration = DefaultConnectionKeepAliveStrategy.INSTANCE.getKeepAliveDuration(response, context);
+
+                    if (duration > 0 && duration < config.getKeepAliveDurationMillis()) {
+                        return duration;
+                    } else {
+                        return config.getKeepAliveDurationMillis();
+                    }
+                }
+            });
+        }
+
+        httpClient = builder.build();
+    }
+}
+```
+
