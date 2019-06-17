@@ -151,6 +151,48 @@ final class ProfilesParser {
 
 ```
 
+```java
+@Override
+	protected final ClientHttpResponse executeInternal(HttpHeaders headers, byte[] bufferedOutput) throws IOException {
+		InterceptingRequestExecution requestExecution = new InterceptingRequestExecution();
+		return requestExecution.execute(this, bufferedOutput);
+	}
+
+
+	private class InterceptingRequestExecution implements ClientHttpRequestExecution {
+
+		private final Iterator<ClientHttpRequestInterceptor> iterator;
+
+		public InterceptingRequestExecution() {
+			this.iterator = interceptors.iterator();
+		}
+
+		@Override
+		public ClientHttpResponse execute(HttpRequest request, byte[] body) throws IOException {
+			if (this.iterator.hasNext()) {
+				ClientHttpRequestInterceptor nextInterceptor = this.iterator.next();
+				return nextInterceptor.intercept(request, body, this);
+			}
+			else {
+				HttpMethod method = request.getMethod();
+				Assert.state(method != null, "No standard HTTP method");
+				ClientHttpRequest delegate = requestFactory.createRequest(request.getURI(), method);
+				request.getHeaders().forEach((key, value) -> delegate.getHeaders().addAll(key, value));
+				if (body.length > 0) {
+					if (delegate instanceof StreamingHttpOutputMessage) {
+						StreamingHttpOutputMessage streamingOutputMessage = (StreamingHttpOutputMessage) delegate;
+						streamingOutputMessage.setBody(outputStream -> StreamUtils.copy(body, outputStream));
+					}
+					else {
+						StreamUtils.copy(body, delegate.getBody());
+					}
+				}
+				return delegate.execute();
+			}
+		}
+	}
+```
+
 
 
 ```java
@@ -169,5 +211,82 @@ private Class<?> deduceMainApplicationClass() {
 		}
 		return null;
 	}
+```
+
+
+
+```java
+public class DeferredResultMethodReturnValueHandler implements HandlerMethodReturnValueHandler {
+
+	@Override
+	public boolean supportsReturnType(MethodParameter returnType) {
+		Class<?> type = returnType.getParameterType();
+		return (DeferredResult.class.isAssignableFrom(type) ||
+				ListenableFuture.class.isAssignableFrom(type) ||
+				CompletionStage.class.isAssignableFrom(type));
+	}
+
+	@Override
+	public void handleReturnValue(@Nullable Object returnValue, MethodParameter returnType,
+			ModelAndViewContainer mavContainer, NativeWebRequest webRequest) throws Exception {
+
+		if (returnValue == null) {
+			mavContainer.setRequestHandled(true);
+			return;
+		}
+
+		DeferredResult<?> result;
+
+		if (returnValue instanceof DeferredResult) {
+			result = (DeferredResult<?>) returnValue;
+		}
+		else if (returnValue instanceof ListenableFuture) {
+			result = adaptListenableFuture((ListenableFuture<?>) returnValue);
+		}
+		else if (returnValue instanceof CompletionStage) {
+			result = adaptCompletionStage((CompletionStage<?>) returnValue);
+		}
+		else {
+			// Should not happen...
+			throw new IllegalStateException("Unexpected return value type: " + returnValue);
+		}
+
+		WebAsyncUtils.getAsyncManager(webRequest).startDeferredResultProcessing(result, mavContainer);
+	}
+
+	private DeferredResult<Object> adaptListenableFuture(ListenableFuture<?> future) {
+		DeferredResult<Object> result = new DeferredResult<>();
+		future.addCallback(new ListenableFutureCallback<Object>() {
+			@Override
+			public void onSuccess(@Nullable Object value) {
+				result.setResult(value);
+			}
+			@Override
+			public void onFailure(Throwable ex) {
+				result.setErrorResult(ex);
+			}
+		});
+		return result;
+	}
+
+	private DeferredResult<Object> adaptCompletionStage(CompletionStage<?> future) {
+		DeferredResult<Object> result = new DeferredResult<>();
+		future.handle((BiFunction<Object, Throwable, Object>) (value, ex) -> {
+			if (ex != null) {
+				if (ex instanceof CompletionException && ex.getCause() != null) {
+					ex = ex.getCause();
+				}
+				result.setErrorResult(ex);
+			}
+			else {
+				result.setResult(value);
+			}
+			return null;
+		});
+		return result;
+	}
+
+}
+
 ```
 
