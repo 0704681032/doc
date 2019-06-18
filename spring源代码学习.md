@@ -193,6 +193,30 @@ final class ProfilesParser {
 	}
 ```
 
+```java
+//ConfigurationPropertiesBindingPostProcessor
+
+@Override
+	public Object postProcessBeforeInitialization(Object bean, String beanName)
+			throws BeansException {
+		ConfigurationProperties annotation = getAnnotation(bean, beanName,
+				ConfigurationProperties.class);
+		if (annotation != null) {
+			bind(bean, beanName, annotation);
+		}
+		return bean;
+	}
+
+private <A extends Annotation> A getAnnotation(Object bean, String beanName,
+			Class<A> type) {
+		A annotation = this.beanFactoryMetadata.findFactoryAnnotation(beanName, type);
+		if (annotation == null) {
+			annotation = AnnotationUtils.findAnnotation(bean.getClass(), type);
+		}
+		return annotation;
+	}
+```
+
 
 
 ```java
