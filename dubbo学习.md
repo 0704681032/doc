@@ -64,6 +64,31 @@ public class ProtocolFilterWrapper implements Protocol {
 
 
 
+```java
+	//org.apache.dubbo.common.threadpool.support.eager.TaskQueue    
+
+    @Override
+    public boolean offer(Runnable runnable) {//override offer方法,这个实现着对线程池的代码细节了解很深
+        if (executor == null) {
+            throw new RejectedExecutionException("The task queue does not have executor!");
+        }
+
+        int currentPoolThreadSize = executor.getPoolSize();
+        // have free worker. put task into queue to let the worker deal with task.
+        if (executor.getSubmittedTaskCount() < currentPoolThreadSize) {
+            return super.offer(runnable);
+        }
+
+        // return false to let executor create new worker.
+        if (currentPoolThreadSize < executor.getMaximumPoolSize()) {//very good
+            return false;
+        }
+
+        // currentPoolThreadSize >= max
+        return super.offer(runnable);
+    }
+```
+
 
 
 ```java
