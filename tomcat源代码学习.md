@@ -340,3 +340,78 @@ public void run() {
 
 ```
 
+
+
+```java
+public class AsyncFileHandler extends FileHandler {
+
+    public static final int OVERFLOW_DROP_LAST    = 1;
+    public static final int OVERFLOW_DROP_FIRST   = 2;
+    public static final int OVERFLOW_DROP_FLUSH   = 3;
+    public static final int OVERFLOW_DROP_CURRENT = 4;
+
+    public static final int DEFAULT_OVERFLOW_DROP_TYPE = 1;
+    public static final int DEFAULT_MAX_RECORDS        = 10000;
+    public static final int DEFAULT_LOGGER_SLEEP_TIME  = 1000;
+
+    public static final int OVERFLOW_DROP_TYPE = Integer.parseInt(
+            System.getProperty("org.apache.juli.AsyncOverflowDropType",
+                               Integer.toString(DEFAULT_OVERFLOW_DROP_TYPE)));
+    public static final int MAX_RECORDS = Integer.parseInt(
+            System.getProperty("org.apache.juli.AsyncMaxRecordCount",
+                               Integer.toString(DEFAULT_MAX_RECORDS)));
+    public static final int LOGGER_SLEEP_TIME = Integer.parseInt(
+            System.getProperty("org.apache.juli.AsyncLoggerPollInterval",
+                               Integer.toString(DEFAULT_LOGGER_SLEEP_TIME)));
+
+    protected static final LinkedBlockingDeque<LogEntry> queue =
+            new LinkedBlockingDeque<>(MAX_RECORDS);
+
+    protected static final LoggerThread logger = new LoggerThread();
+
+    static {
+        logger.start();
+    }
+}
+
+	@Override
+    public void publish(LogRecord record) {
+        if (!isLoggable(record)) {
+            return;
+        }
+        // fill source entries, before we hand the record over to another
+        // thread with another class loader
+        record.getSourceMethodName();
+        LogEntry entry = new LogEntry(record, this);
+        boolean added = false;
+        try {
+            while (!added && !queue.offer(entry)) {
+                switch (OVERFLOW_DROP_TYPE) {
+                    case OVERFLOW_DROP_LAST: {
+                        //remove the last added element
+                        queue.pollLast();
+                        break;//注意这里的break是case需要的break
+                    }
+                    case OVERFLOW_DROP_FIRST: {
+                        //remove the first element in the queue
+                        queue.pollFirst();
+                        break;
+                    }
+                    case OVERFLOW_DROP_FLUSH: {
+                        added = queue.offer(entry, 1000, TimeUnit.MILLISECONDS);
+                        break;
+                    }
+                    case OVERFLOW_DROP_CURRENT: {
+                        added = true;
+                        break;
+                    }
+                }//switch
+            }//while
+        } catch (InterruptedException x) {
+            // Allow thread to be interrupted and back out of the publish
+            // operation. No further action required.
+        }
+
+    }
+```
+
