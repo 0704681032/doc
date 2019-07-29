@@ -1,4 +1,4 @@
-## httpasynclient源代码学习
+##   httpasynclient源代码学习
 
 核心类如下
 
@@ -10,7 +10,11 @@
 *  DefaultNHttpClientConnection
 * DefaultClientExchangeHandlerImpl
 
-
+* IOSessionImpl
+* AbstractNIOConnPool
+* 处处皆异步
+  *  SessionRequestImpl -> SessionRequestCallback
+  *   LeaseRequest
 
 
 
@@ -198,6 +202,248 @@ private void connectionAllocated(final NHttpClientConnection managedConn) {
             failed(runex);
             throw runex;
         }
+    }
+```
+
+
+
+```java
+//NHttpConnectionBase 
+@Override
+    public void requestInput() {
+        this.session.setEvent(EventMask.READ);
+    }
+
+    @Override
+    public void requestOutput() {
+        this.session.setEvent(EventMask.WRITE);
+    }
+
+    @Override
+    public void suspendInput() {
+        this.session.clearEvent(EventMask.READ);
+    }
+
+    @Override
+    public void suspendOutput() {
+        synchronized (this.session) {
+            if (!this.outbuf.hasData()) {
+                this.session.clearEvent(EventMask.WRITE);
+            }
+        }
+    }
+```
+
+
+
+```java
+
+//AbstractClientExchangeHandler
+final void requestConnection() {
+        final HttpRoute route = this.routeRef.get();
+        if (this.log.isDebugEnabled()) {
+            this.log.debug("[exchange: " + this.id + "] Request connection for " + route);
+        }
+
+        discardConnection();
+
+        this.validDurationRef.set(null);
+        this.routeTrackerRef.set(null);
+        this.routeEstablished.set(false);
+
+        final Object userToken = this.localContext.getUserToken();
+        final RequestConfig config = this.localContext.getRequestConfig();
+        this.connectionFutureRef.set(this.connmgr.requestConnection(
+                route,
+                userToken,
+                config.getConnectTimeout(),
+                config.getConnectionRequestTimeout(),
+                TimeUnit.MILLISECONDS,
+          		//注意这里的回调
+                new FutureCallback<NHttpClientConnection>() {
+
+                    @Override
+                    public void completed(final NHttpClientConnection managedConn) {
+                        connectionAllocated(managedConn);//注意这里
+                    }
+
+                    @Override
+                    public void failed(final Exception ex) {
+                        connectionRequestFailed(ex);
+                    }
+
+                    @Override
+                    public void cancelled() {
+                        connectionRequestCancelled();
+                    }
+
+                }));
+    }
+```
+
+
+
+```java
+//同样关注这里的回调 
+@Override
+    public Future<NHttpClientConnection> requestConnection(
+            final HttpRoute route,
+            final Object state,
+            final long connectTimeout,
+            final long leaseTimeout,
+            final TimeUnit tunit,
+            final FutureCallback<NHttpClientConnection> callback) {
+        Args.notNull(route, "HTTP route");
+        if (this.log.isDebugEnabled()) {
+            this.log.debug("Connection request: " + format(route, state) + formatStats(route));
+        }
+        final BasicFuture<NHttpClientConnection> resultFuture = new BasicFuture<NHttpClientConnection>(callback);
+        final HttpHost host;
+        if (route.getProxyHost() != null) {
+            host = route.getProxyHost();
+        } else {
+            host = route.getTargetHost();
+        }
+        final SchemeIOSessionStrategy sf = this.iosessionFactoryRegistry.lookup(
+                host.getSchemeName());
+        if (sf == null) {
+            resultFuture.failed(new UnsupportedSchemeException(host.getSchemeName() +
+                    " protocol is not supported"));
+            return resultFuture;
+        }
+        final Future<CPoolEntry> leaseFuture = this.pool.lease(route, state,
+                connectTimeout, leaseTimeout, tunit != null ? tunit : TimeUnit.MILLISECONDS,
+                new FutureCallback<CPoolEntry>() {
+
+                    @Override
+                    public void completed(final CPoolEntry entry) {
+                        Asserts.check(entry.getConnection() != null, "Pool entry with no connection");
+                        if (log.isDebugEnabled()) {
+                            log.debug("Connection leased: " + format(entry) + formatStats(entry.getRoute()));
+                        }
+                        final NHttpClientConnection managedConn = CPoolProxy.newProxy(entry);
+                        if (!resultFuture.completed(managedConn)) {
+                            pool.release(entry, true);
+                        }
+                    }
+
+                    @Override
+                    public void failed(final Exception ex) {
+                        if (log.isDebugEnabled()) {
+                            log.debug("Connection request failed", ex);
+                        }
+                        resultFuture.failed(ex);
+                    }
+
+                    @Override
+                    public void cancelled() {
+                        log.debug("Connection request cancelled");
+                        resultFuture.cancel(true);
+                    }
+
+                });
+        return new Future<NHttpClientConnection>() {
+
+            @Override
+            public boolean cancel(final boolean mayInterruptIfRunning) {
+                try {
+                    leaseFuture.cancel(mayInterruptIfRunning);
+                } finally {
+                    return resultFuture.cancel(mayInterruptIfRunning);
+                }
+            }
+
+            @Override
+            public boolean isCancelled() {
+                return resultFuture.isCancelled();
+            }
+
+            @Override
+            public boolean isDone() {
+                return resultFuture.isDone();
+            }
+
+            @Override
+            public NHttpClientConnection get() throws InterruptedException, ExecutionException {
+                return resultFuture.get();
+            }
+
+            @Override
+            public NHttpClientConnection get(final long timeout, final TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+                return resultFuture.get(timeout, unit);
+            }
+
+        };
+    }
+
+```
+
+
+
+```java
+//AbstractNIOConnPool 
+/**
+     * @since 4.3
+     */
+    public Future<E> lease(
+            final T route, final Object state,
+            final long connectTimeout, final long leaseTimeout, final TimeUnit timeUnit,
+            final FutureCallback<E> callback) {
+        Args.notNull(route, "Route");
+        Args.notNull(timeUnit, "Time unit");
+        Asserts.check(!this.isShutDown.get(), "Connection pool shut down");
+        final BasicFuture<E> future = new BasicFuture<E>(callback);
+        final LeaseRequest<T, C, E> leaseRequest = new LeaseRequest<T, C, E>(route, state,
+                connectTimeout >= 0 ? timeUnit.toMillis(connectTimeout) : -1,
+                leaseTimeout > 0 ? timeUnit.toMillis(leaseTimeout) : 0,
+                future);
+        this.lock.lock();
+        try {
+            final boolean completed = processPendingRequest(leaseRequest);
+            if (!leaseRequest.isDone() && !completed) {
+                this.leasingRequests.add(leaseRequest);
+            }
+            if (leaseRequest.isDone()) {
+                this.completedRequests.add(leaseRequest);
+            }
+        } finally {
+            this.lock.unlock();
+        }
+        fireCallbacks();
+        return new Future<E>() {
+
+            @Override
+            public E get() throws InterruptedException, ExecutionException {
+                return future.get();
+            }
+
+            @Override
+            public E get(
+                    final long timeout,
+                    final TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+                return future.get(timeout, unit);
+            }
+
+            @Override
+            public boolean cancel(final boolean mayInterruptIfRunning) {
+                try {
+                    leaseRequest.cancel();
+                } finally {
+                    return future.cancel(mayInterruptIfRunning);
+                }
+            }
+
+            @Override
+            public boolean isCancelled() {
+                return future.isCancelled();
+            }
+
+            @Override
+            public boolean isDone() {
+                return future.isDone();
+            }
+
+        };
     }
 ```
 
