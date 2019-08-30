@@ -1,5 +1,137 @@
 dubbo学习片段
 
+
+
+```java
+public class AllDispatcher implements Dispatcher {
+
+    public static final String NAME = "all";
+
+    @Override
+    public ChannelHandler dispatch(ChannelHandler handler, URL url) {
+        return new AllChannelHandler(handler, url);
+    }
+
+}
+// 👆👆
+//ChannelHandlers
+protected ChannelHandler wrapInternal(ChannelHandler handler, URL url) {
+        return new MultiMessageHandler(new HeartbeatHandler(ExtensionLoader.getExtensionLoader(Dispatcher.class)
+                .getAdaptiveExtension().dispatch(handler, url)));
+    }
+//👆👆
+  public NettyClient(final URL url, final ChannelHandler handler) throws RemotingException {
+    	// you can customize name and type of client thread pool by THREAD_NAME_KEY and THREADPOOL_KEY in CommonConstants.
+    	// the handler will be warped: MultiMessageHandler->HeartbeatHandler->handler
+    	super(url, wrapChannelHandler(url, handler));
+    }
+//👆👆 NettyTransporter
+ @Override
+    public Client connect(URL url, ChannelHandler listener) throws RemotingException {
+        return new NettyClient(url, listener);
+    }
+	//👆👆
+  @Override
+    public ExchangeClient connect(URL url, ExchangeHandler handler) throws RemotingException {
+        return new HeaderExchangeClient(Transporters.connect(url, new DecodeHandler(new HeaderExchangeHandler(handler))), true);
+    }
+	// 👆👆
+   public static ExchangeClient connect(URL url, ChannelHandler handler, Replier<?> replier) throws RemotingException {
+        return connect(url, new ExchangeHandlerDispatcher(replier, handler));
+    }
+  // 👆👆
+  public static ExchangeClient connect(URL url) throws RemotingException {
+        return connect(url, new ChannelHandlerAdapter(), null);
+    }
+///////////////////////////////
+/**
+     * Create new connection
+     *
+     * @param url
+     */
+    private ExchangeClient initClient(URL url) {
+
+        // client type setting.
+        String str = url.getParameter(CLIENT_KEY, url.getParameter(SERVER_KEY, DEFAULT_REMOTING_CLIENT));
+
+        url = url.addParameter(CODEC_KEY, DubboCodec.NAME);
+        // enable heartbeat by default
+        url = url.addParameterIfAbsent(HEARTBEAT_KEY, String.valueOf(DEFAULT_HEARTBEAT));
+
+        // BIO is not allowed since it has severe performance issue.
+        if (str != null && str.length() > 0 && !ExtensionLoader.getExtensionLoader(Transporter.class).hasExtension(str)) {
+            throw new RpcException("Unsupported client type: " + str + "," +
+                    " supported client type is " + StringUtils.join(ExtensionLoader.getExtensionLoader(Transporter.class).getSupportedExtensions(), " "));
+        }
+
+        ExchangeClient client;
+        try {
+            // connection should be lazy
+            if (url.getParameter(LAZY_CONNECT_KEY, false)) {
+                client = new LazyConnectExchangeClient(url, requestHandler);
+
+            } else {
+                client = Exchangers.connect(url, requestHandler);//这里创建连接
+            }
+
+        } catch (RemotingException e) {
+            throw new RpcException("Fail to create remoting client for service(" + url + "): " + e.getMessage(), e);
+        }
+
+        return client;
+    }
+		
+
+
+//执行流程 网络 HeaderExchanger
+  @Override
+    public ExchangeClient connect(URL url, ExchangeHandler handler) throws RemotingException {
+        return new HeaderExchangeClient(Transporters.connect(url, new DecodeHandler(new HeaderExchangeHandler(handler))), true);
+      //注意这里的new DecodeHandler(new HeaderExchangeHandler(handler)) 层层包装
+    }
+
+//Transporters
+ public static Client connect(URL url, ChannelHandler... handlers) throws RemotingException {
+        if (url == null) {
+            throw new IllegalArgumentException("url == null");
+        }
+        ChannelHandler handler;
+        if (handlers == null || handlers.length == 0) {
+            handler = new ChannelHandlerAdapter();
+        } else if (handlers.length == 1) {
+            handler = handlers[0];
+        } else {
+            handler = new ChannelHandlerDispatcher(handlers);//这里也要学习
+        }
+        return getTransporter().connect(url, handler);
+    }
+
+//NettyTransporter
+@Override
+    public Client connect(URL url, ChannelHandler listener) throws RemotingException {
+        return new NettyClient(url, listener);
+    }
+
+
+//NettyClient
+  @Override
+    protected org.apache.dubbo.remoting.Channel getChannel() {
+        Channel c = channel;
+        if (c == null || !c.isActive()) {
+            return null;
+        }
+        return NettyChannel.getOrAddChannel(c, getUrl(), this);
+    }
+```
+
+
+
+
+
+
+
+
+
 ```java
 //最喜欢的代码  非常类似于fp中的foldRight
 //在java中形成了闭包
