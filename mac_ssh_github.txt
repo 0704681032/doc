@@ -17,4 +17,11 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/mas
 关闭spotlight
 
 
+配置maven 十分重要
+ <mirror>
+        <id>nexus-aliyun</id>
+        <mirrorOf>*</mirrorOf>
+        <name>Nexus aliyun</name>
+        <url>http://maven.aliyun.com/nexus/content/groups/public</url>
+    </mirror> 
 
