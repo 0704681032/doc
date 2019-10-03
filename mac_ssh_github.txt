@@ -1,5 +1,12 @@
- $ git config --global user.name "name"
- $ git config --global user.email "xxx@xxx.com"
+/usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
+
+
+
+ln -s /Volumes/MemoryCard/.m2/repository/ /Users/jyy/.m2
+ 
+ 
+ git config --global user.name "name"
+ git config --global user.email "xxx@xxx.com"
 
 
 ssh-keygen -t rsa -C "xiangshuo1992@gmail.com"
