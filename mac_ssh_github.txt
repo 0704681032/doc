@@ -14,7 +14,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/mas
 
 
 禁用qq的Swiftly 和alfred重复
-
+关闭spotlight
 
 
 
