@@ -1,6 +1,9 @@
 #!/bin/bash
 baseDir=`pwd`
 echo $baseDir
+baseDir=$(cd "$(dirname "$0")";pwd)
+echo $baseDir
+
 for projects in `ls $baseDir`
 do
    projectsDir=$baseDir"/"$projects
